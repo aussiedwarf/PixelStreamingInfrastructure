@@ -28,6 +28,7 @@ import {
     WebRTCSettings
 } from '../DataChannel/InitialSettings';
 import { LatencyTestResults } from '../DataChannel/LatencyTestResults';
+import { LatencyTestResponse } from '../DataChannel/LatencyTest';
 import { Logger } from '../Logger/Logger';
 import { FileTemplate, FileUtil } from '../Util/FileUtil';
 import { InputClassesFactory } from '../Inputs/InputClassesFactory';
@@ -96,6 +97,7 @@ export class WebRtcPlayerController {
     isUsingSFU: boolean;
     isQualityController: boolean;
     statsTimerHandle: number;
+    timestampTimerHandle: number;
     file: FileTemplate;
     preferredCodec: string;
     peerConfig: RTCConfiguration;
@@ -223,7 +225,10 @@ export class WebRtcPlayerController {
             if (this.statsTimerHandle && this.statsTimerHandle !== undefined) {
                 window.clearInterval(this.statsTimerHandle);
             }
-
+            if (this.timestampTimerHandle && this.timestampTimerHandle !== undefined) {
+                window.clearInterval(this.timestampTimerHandle);
+            }
+            
             // unregister all input device event handlers on disconnect
             this.setTouchInputEnabled(false);
             this.setMouseInputEnabled(false);
@@ -420,6 +425,11 @@ export class WebRtcPlayerController {
         );
         this.streamMessageController.registerMessageHandler(
             MessageDirection.FromStreamer,
+            'DataChannelLatencyTest',
+            (data: ArrayBuffer) => this.handleDataChannelLatencyTestResponse(data)
+        );
+        this.streamMessageController.registerMessageHandler(
+            MessageDirection.FromStreamer,
             'Protocol',
             (data: ArrayBuffer) => this.onProtocolMessage(data)
         );
@@ -477,6 +487,23 @@ export class WebRtcPlayerController {
                 this.sendMessageController.sendMessageToStreamer(
                     'LatencyTest', data
                 )
+        );
+        this.streamMessageController.registerMessageHandler(
+            MessageDirection.ToStreamer,
+            'DataChannelLatencyTest',
+            (data: Array<number | string>) =>
+                this.sendMessageController.sendMessageToStreamer(
+                    'DataChannelLatencyTest', data
+                )
+        );
+        this.streamMessageController.registerMessageHandler(
+            MessageDirection.ToStreamer,
+            'DataChannelTimestampReport',
+            (data: Array<number | string>) => {
+                this.sendMessageController.sendMessageToStreamer(
+                    'DataChannelTimestampReport', data
+                )
+            }
         );
         this.streamMessageController.registerMessageHandler(
             MessageDirection.ToStreamer,
@@ -818,7 +845,7 @@ export class WebRtcPlayerController {
                         }
 
                         // UE5.1 and UE5.2 don't send a structure for these message types, but they actually do have a structure so ignore updating them
-                        if((messageType === "UIInteraction" || messageType === "Command" || messageType === "LatencyTest")) {
+                        if((messageType === "UIInteraction" || messageType === "Command" || messageType === "LatencyTest" ||  messageType === "DataChannelLatencyTest" || messageType === "DataChannelTimestampReport")) {
                             return;
                         }
 
@@ -1494,8 +1521,12 @@ export class WebRtcPlayerController {
         if (this.statsTimerHandle && this.statsTimerHandle !== undefined) {
             window.clearInterval(this.statsTimerHandle);
         }
+        if (this.timestampTimerHandle && this.timestampTimerHandle !== undefined) {
+            window.clearInterval(this.timestampTimerHandle);
+        }
 
         this.statsTimerHandle = window.setInterval(() => this.getStats(), 1000);
+        this.timestampTimerHandle = window.setInterval(() => this.sendTimestampReport(), 500);
 
         /*  */
         this.setMouseInputEnabled(this.config.isFlagEnabled(Flags.MouseInput));
@@ -1632,6 +1663,32 @@ export class WebRtcPlayerController {
         )([JSON.stringify({
             StartTime: this.latencyStartTime
         })]);
+    }
+
+    /**
+     * Send a Latency Test Response to the UE Instance
+     */
+    sendLatencyTestResponse(response: LatencyTestResponse) {
+        response.SentTimestamp = Math.round(performance.now() * 1000000);
+
+        this.streamMessageController.toStreamerHandlers.get(
+            'DataChannelLatencyTest'
+        )([JSON.stringify(response)]);
+    }
+
+    /**
+     * Send a Latency Test Response to the UE Instance
+     */
+    sendTimestampReport() {
+        const data = this.videoPlayer.frameTimestamps;
+
+        if(data.timestamps.length > 0){
+            this.streamMessageController.toStreamerHandlers.get(
+                'DataChannelTimestampReport'
+            )([JSON.stringify(data)]);
+
+            this.videoPlayer.frameTimestamps.timestamps.length = 0;
+        }
     }
 
     /**
@@ -1859,6 +1916,27 @@ export class WebRtcPlayerController {
                 +latencyTestResults.CaptureToSendMs);
         }
         this.pixelStreaming._onLatencyTestResult(latencyTestResults);
+    }
+
+    /**
+     * Handles when a Data Channel Latency Test Response is received from the UE Instance
+     * @param message - Data Channel Latency Test Response
+     */
+    handleDataChannelLatencyTestResponse(message: ArrayBuffer) {
+        const receivedTimestamp = performance.now();
+
+        const responseAsString = new TextDecoder('utf-8').decode(
+            message.slice(1)
+        );
+        const latencyTestResponse: LatencyTestResponse = new LatencyTestResponse();
+        Object.assign(latencyTestResponse, JSON.parse(responseAsString));
+
+        const response: LatencyTestResponse = new LatencyTestResponse();
+        response.Seq = latencyTestResponse.Seq;
+        response.SenderTimestamp = latencyTestResponse.SentTimestamp;
+        response.ReceivedTimestamp = Math.round(receivedTimestamp * 1000000);
+
+        this.sendLatencyTestResponse(response);
     }
 
     /**

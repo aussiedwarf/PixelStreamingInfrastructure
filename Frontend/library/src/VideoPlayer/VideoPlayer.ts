@@ -2,6 +2,7 @@
 
 import { Config, Flags } from '../Config/Config';
 import { Logger } from '../Logger/Logger';
+import { LatencyTimestampData, LatencyTimestampReport } from '../DataChannel/LatencyTest'
 
 /**
  * Extra types for the HTMLElement
@@ -20,12 +21,13 @@ export class VideoPlayer {
     private videoElement: HTMLVideoElement;
     private orientationChangeTimeout: number;
     private lastTimeResized = new Date().getTime();
-	private canvas: HTMLCanvasElement;
-	private canvasContext: CanvasRenderingContext2D;
+    private canvas: HTMLCanvasElement;
+    private canvasContext: CanvasRenderingContext2D;
 
     onMatchViewportResolutionCallback: (width: number, height: number) => void;
     onResizePlayerCallback: () => void;
     resizeTimeoutHandle: number;
+    frameTimestamps: LatencyTimestampReport;
 
     /**
      * @param videoElementParent the html div the the video player will be injected into
@@ -41,10 +43,11 @@ export class VideoPlayer {
         this.videoElement.style.height = '100%';
         this.videoElement.style.position = 'absolute';
         this.videoElement.style.pointerEvents = 'all';
-		this.canvas = document.createElement("canvas");
-		this.canvas.width = 512;
-		this.canvas.height = 8;
-		this.canvasContext = this.canvas.getContext("2d", { willReadFrequently: true });
+        this.canvas = document.createElement("canvas");
+        this.canvas.width = 512;
+        this.canvas.height = 8;
+        this.canvasContext = this.canvas.getContext("2d", { willReadFrequently: true });
+        this.frameTimestamps = new LatencyTimestampReport;
         videoElementParent.appendChild(this.videoElement);
 
         this.onResizePlayerCallback = () => {
@@ -75,68 +78,74 @@ export class VideoPlayer {
             this.onOrientationChange()
         );
 
-		// Firefox does not support requestVideoFrameCallback as of September 2023
-		// TODO(Eden.Harris) Only request callback is getting latency data
-		if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
-			this.videoElement.requestVideoFrameCallback((now: number) => {
-				this.onFrame(now);
-			});
-		}
-		
+        // Firefox does not support requestVideoFrameCallback as of September 2023
+        // TODO(Eden.Harris) Only request callback if getting latency data
+        if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+            this.videoElement.requestVideoFrameCallback((now: DOMHighResTimeStamp, metadata: VideoFrameCallbackMetadata) => {
+                this.onFrame(now, metadata);
+            });
+        }
+        
     }
 
-	/**
+    /**
      * On Video Frame updated, get the embedded timestamp from the frame.
      */
-	onFrame(now: number ) {
-		// TODO REUSE canvas
-		const canvas = this.canvas;
-		const width = canvas.width;
-		const height = canvas.height;
-		const canvasContext = this.canvasContext;
+    onFrame(now: DOMHighResTimeStamp, metadata: VideoFrameCallbackMetadata) {
+        const canvas = this.canvas;
+        const width = canvas.width;
+        const height = canvas.height;
+        const canvasContext = this.canvasContext;
 
-		canvasContext.drawImage(this.videoElement, 0, 0, width, height, 0, 0, width, height);
-		const  imageData = canvasContext.getImageData(0, 0, width, height);
-		const pixels = imageData.data;
+        canvasContext.drawImage(this.videoElement, 0, 0, width, height, 0, 0, width, height);
+        const  imageData = canvasContext.getImageData(0, 0, width, height);
+        const pixels = imageData.data;
 
-		let time = this.getBarcode(pixels, width);
+        let time = this.getBarcode(pixels, width);
 
-		// Logger.Log(
-		// 	Logger.GetStackTrace(),
-		// 	'onFrame' + time,
-		// 	3
-		// );
+        const latencyTimestampData: LatencyTimestampData = new LatencyTimestampData();
+        latencyTimestampData.Draw = Number(time);
+        if(metadata.captureTime !== undefined){
+            latencyTimestampData.Capture = Math.round(metadata.captureTime * 1000000);
+        }
+        if(metadata.receiveTime !== undefined){
+            latencyTimestampData.Network = Math.round(metadata.receiveTime * 1000000);
+        }
+        latencyTimestampData.Decode = Math.round(metadata.presentationTime * 1000000);
+        latencyTimestampData.FrameNum = Math.round(metadata.presentedFrames * 1000000);	//This does not appear to be correct
 
-		this.videoElement.requestVideoFrameCallback((now: number)=>{
-			this.onFrame(now);
-		});
-	}
+        this.frameTimestamps.timestamps.push(latencyTimestampData);
 
-	/**
+        this.videoElement.requestVideoFrameCallback((now: DOMHighResTimeStamp, metadata: VideoFrameCallbackMetadata)=>{
+            this.onFrame(now, metadata);
+        });
+    }
+
+    /**
      * Reads a latency timestamp barcode embedded inside a frame.
-	 * @returns the time encoded in a frame barcode.
+     * @returns the time encoded in a frame barcode.
      */
-	getBarcode(pixels: Uint8ClampedArray, width: number): number {
-		let time = 0;
-		//for each bit of the barcode
-		for (let i = 0; i < 63; ++i) 
-		{
-			//grab the average of the center 4x4 pixels
-			let pixel = 0;
-			for (let y = 0; y < 4; ++y) 
-			{
-				for (let x = 0; x < 4; ++x) 
-				{
-					pixel += pixels[((x+2 + i * 8) + (y+2) * width) * 4];
-				}
-			}
-			pixel /= 16;
-			
-			time |= (pixel > 127 ? 1 : 0) << i;
-		}
+    getBarcode(pixels: Uint8ClampedArray, width: number): BigInt {
+        let time = BigInt(0);
+        //for each bit of the barcode
+        for (let i = 0; i < 63; ++i) 
+        {
+            //grab the average of the center 4x4 pixels
+            let pixel = 0;
+            for (let y = 0; y < 4; ++y) 
+            {
+                for (let x = 0; x < 4; ++x) 
+                {
+                    pixel += pixels[((x+2 + i * 8) + (y+2) * width) * 4];
+                }
+            }
+            pixel /= 16;
+            
+            time |= (pixel > 127 ? BigInt(1) : BigInt(0)) << BigInt(i);
+        }
 
-		return time;
-	}
+        return time;
+    }
 
     /**
      * Sets up the video element with any application config and plays the video element.
