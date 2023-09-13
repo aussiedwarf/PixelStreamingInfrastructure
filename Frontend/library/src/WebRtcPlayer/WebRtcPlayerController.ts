@@ -1925,7 +1925,7 @@ export class WebRtcPlayerController {
     handleDataChannelLatencyTestResponse(message: ArrayBuffer) {
         const receivedTimestamp = performance.now();
 
-        const responseAsString = new TextDecoder('utf-8').decode(
+        const responseAsString = new TextDecoder('utf-16').decode(
             message.slice(1)
         );
         const latencyTestResponse: LatencyTestResponse = new LatencyTestResponse();
